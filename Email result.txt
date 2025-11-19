@@ -1,0 +1,30 @@
+DECLARE @emailBody nvarchar(max)
+
+set @emailBody = N'
+All,<br>
+The DataLink production data load is complete.  Data is available through <b>' 
++ cast((SELECT convert(varchar(30),max(coverage_history_added_datetime),101) from HPS_EDW.dbo.DIM_COVERAGE_DETAILS_SUBSCRIBER) as nvarchar(max)) 
++ N' @ '
++ cast((SELECT convert(varchar(30),max(coverage_history_added_datetime),108) from HPS_EDW.dbo.DIM_COVERAGE_DETAILS_SUBSCRIBER) as nvarchar(max)) 
++ N'
+</b>
+<br>
+<br>
+Thank you,
+<br>
+<br>DataLink Team
+<br>IT Product Development • HealthPlan Services ℠
+<br>6700 Lakeview Center Dr • Tampa, FL NULL19
+<br>e: datalink@healthplan.com
+'
+
+USE msdb
+    EXEC sp_send_dbmail
+   @profile_name = 'SQL DB Admins',
+      --@profile_name = 'DataLink Notify',
+	  --@from_address = 'DataLink_NoReply@healthplan.com',
+	  --@reply_to = 'DataLink_NoReply@healthplan.com',
+      @recipients = 'WHPS-Datalink-Internal@wipro.com;ramchandraiah.maddineni1@wipro.com;gitta.amulya@wipro.com;sathiyaneethi.mani@wipro.com;kishore.chittampalli@wipro.com;khaled.sardouk@wipro.com',
+      @subject = 'DataLink loaded through date.',
+      @body = @emailBody,
+	  @body_format = 'html';
