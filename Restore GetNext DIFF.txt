@@ -1,0 +1,21 @@
+IF NOT EXISTS (SELECT @@SERVERNAME, *
+	FROM sys.dm_hadr_availability_replica_states  rs
+	INNER JOIN sys.availability_databases_cluster dc ON rs.group_id = dc.group_id
+	WHERE is_local = 1
+		AND role_desc = 'PRIMARY'
+		
+)  
+AND EXISTS(select name from sys.databases where state_desc <>'ONLINE' and name='GetNext')
+BEGIN
+DECLARE @datetime DATETIME = CONVERT(VARCHAR(10), GETDATE(), 120) + ' '+ '00:00:00.000'
+ 
+EXECUTE dbo.sp_restoredb	@dbname = 'GetNext', 
+			@newDbName = 'GetNext',
+			-- Diff
+			@restorepaths = '\\hps-tpa-vast.hps.hph.ad\SqlProd\TPAPWSQLGNXTA01\GetNext\DIFF',
+			--@moveLogsTo = 'L:\',
+			--@moveDataTo = 'P:\;O:\;P:\;R:\;S:\;U:\', 
+			@stopAt = '',
+			@filePattern = 'TPAPWSQLGNXTA01_GetNext_*.bak', 
+			@opts = '8'
+END

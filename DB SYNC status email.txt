@@ -1,0 +1,165 @@
+USE [msdb]
+GO
+
+/****** Object:  StoredProcedure [dbo].[usp_DB_SyncStatus_Email]    Script Date: 11/19/2025 5:06:59 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+CREATE PROCEDURE [dbo].[usp_DB_SyncStatus_Email]
+      @ToRecipients    NVARCHAR(4000)
+    , @LogStaleDays    INT            = 2
+    , @MailProfile     SYSNAME        = NULL
+    , @Subject         NVARCHAR(255)  = N'GNXTB01 Server DB sync status'
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @ToRecipients IS NULL OR LTRIM(RTRIM(@ToRecipients)) = ''
+    BEGIN
+        RAISERROR('Recipient list (@ToRecipients) is required.',16,1);
+        RETURN;
+    END
+
+    IF @MailProfile IS NULL
+    BEGIN
+        SELECT TOP (1) @MailProfile = p.name
+        FROM msdb.dbo.sysmail_profile p
+        INNER JOIN msdb.dbo.sysmail_principalprofile pp
+            ON p.profile_id = pp.profile_id
+        WHERE pp.is_default = 1
+        ORDER BY p.profile_id;
+
+        IF @MailProfile IS NULL
+        BEGIN
+            SELECT TOP (1) @MailProfile = p.name
+            FROM msdb.dbo.sysmail_profile p
+            ORDER BY profile_id;
+        END
+    END
+
+    IF @MailProfile IS NULL
+    BEGIN
+        RAISERROR('No Database Mail profile found or specified.',16,1);
+        RETURN;
+    END
+
+    DECLARE @Databases TABLE (DatabaseName sysname PRIMARY KEY);
+    INSERT INTO @Databases (DatabaseName)
+    VALUES    
+     ('GetNext');
+
+    DECLARE @Html NVARCHAR(MAX) = N'<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>GNXTB01 Server DB sync status</title>
+<style>
+ body { font-family:Segoe UI,Arial,sans-serif; font-size:13px; color:#222; }
+ h1 { font-size:18px; margin-bottom:4px; }
+ .note { font-size:12px; color:#444; margin-bottom:12px; }
+ table { border-collapse:collapse; }
+ th, td { border:1px solid #888; padding:4px 8px; text-align:left; font-size:12px; white-space:nowrap; }
+ th { background:#f0f0f0; }
+ .stale { background:#fff8a6; }
+ .na { color:#999; font-style:italic; }
+</style>
+</head>
+<body>
+<h1>GNXTB01 Server DB sync status</h1>
+<div class="note">
+Action may be required if a database name is highlighted (Last Log Restore older than ' + CAST(@LogStaleDays AS nvarchar(10)) + N' day(s)).
+</div>
+<table>
+<tr>
+  <th>Database</th>
+  <th>Last Full Restore</th>
+  <th>Last Diff Restore</th>
+  <th>Last Log Restore</th>
+  <th>Last Log Backup (Used)</th>
+  <th>Log Age (hrs)</th>
+</tr>';
+
+    ;WITH LatestRestore AS
+    (
+        SELECT
+            rs.destination_database_name AS database_name,
+            rs.restore_type,
+            rs.restore_date,
+            bs.backup_start_date,
+            bs.backup_finish_date,
+            ROW_NUMBER() OVER (PARTITION BY rs.destination_database_name, rs.restore_type
+                               ORDER BY rs.restore_date DESC) AS rn
+        FROM msdb.dbo.restorehistory rs
+        JOIN msdb.dbo.backupset bs ON bs.backup_set_id = rs.backup_set_id
+        WHERE rs.restore_type IN ('D','I','L')
+          AND rs.destination_database_name IN (SELECT DatabaseName FROM @Databases)
+    )
+    , DataSet AS
+    (
+        SELECT
+            d.DatabaseName,
+            f.restore_date  AS LastFullRestoreDate,
+            di.restore_date AS LastDiffRestoreDate,
+            lg.restore_date AS LastLogRestoreDate,
+            lg.backup_start_date AS LastLogBackupStartDate   -- Added: timestamp of the log backup that was restored
+        FROM @Databases d
+        LEFT JOIN LatestRestore f  ON f.database_name = d.DatabaseName AND f.restore_type='D' AND f.rn=1
+        LEFT JOIN LatestRestore di ON di.database_name = d.DatabaseName AND di.restore_type='I' AND di.rn=1
+        LEFT JOIN LatestRestore lg ON lg.database_name = d.DatabaseName AND lg.restore_type='L' AND lg.rn=1
+    )
+    , Final AS
+    (
+        SELECT
+            DatabaseName,
+            LastFullRestoreDate,
+            LastDiffRestoreDate,
+            LastLogRestoreDate,
+            LastLogBackupStartDate,
+            LogAgeHours = CASE WHEN LastLogRestoreDate IS NULL THEN NULL
+                               ELSE DATEDIFF(HOUR, LastLogRestoreDate, SYSDATETIME()) END,
+            IsStale = CASE
+                        WHEN LastLogRestoreDate IS NULL THEN 1
+                        WHEN LastLogRestoreDate < DATEADD(DAY, -@LogStaleDays, SYSDATETIME()) THEN 1
+                        ELSE 0
+                      END
+        FROM DataSet
+    )
+    SELECT @Html = @Html +
+           N'<tr>' +
+           N'<td class="' + CASE WHEN IsStale=1 THEN N'stale' ELSE N'' END + N'">' + DatabaseName + N'</td>' +
+           N'<td>' + COALESCE(CONVERT(varchar(19), LastFullRestoreDate, 120), '<span class="na">N/A</span>') + N'</td>' +
+           N'<td>' + COALESCE(CONVERT(varchar(19), LastDiffRestoreDate, 120), '<span class="na">N/A</span>') + N'</td>' +
+           N'<td>' + COALESCE(CONVERT(varchar(19), LastLogRestoreDate, 120), '<span class="na">N/A</span>') + N'</td>' +
+           N'<td>' + COALESCE(CONVERT(varchar(19), LastLogBackupStartDate, 120), '<span class="na">N/A</span>') + N'</td>' +
+           N'<td>' + COALESCE(CAST(LogAgeHours AS varchar(12)), '<span class="na">N/A</span>') + N'</td>' +
+           N'</tr>'
+    FROM Final
+    ORDER BY DatabaseName;
+
+    SET @Html += N'</table>
+</body>
+</html>';
+
+    EXEC msdb.dbo.sp_send_dbmail
+         @profile_name = @MailProfile,
+         @recipients   = @ToRecipients,
+         @subject      = @Subject,
+         @body         = @Html,
+         @body_format  = 'HTML';
+END
+
+GO
+
+to execute in job
+-- EXEC msdb.dbo.usp_DB_SyncStatus_Email
+                        @ToRecipients = N'WHPS-MSSQL-Admins@wipro.com',
+                        @LogStaleDays = 1,
+                        @MailProfile  = 'TPAPWSQLGNXTB01';
+
+
+
