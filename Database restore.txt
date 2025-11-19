@@ -1,0 +1,186 @@
+
+
+
+		-- 1 - Variable declaration 
+		DECLARE @dbName sysname 
+		DECLARE @BackupName varchar(500)
+		DECLARE @FullbackupPath varchar(500) 
+		DECLARE @DiffbackupPath varchar(500) 
+		DECLARE @LogbackupPath varchar(500) 
+		DECLARE @cmd varchar(500) 
+		DECLARE @fileList TABLE (backupFile varchar(255)) 
+		DECLARE @lastFullBackup varchar(500) 
+		DECLARE @lastDiffBackup varchar(500) 
+		DECLARE @backupFile varchar(500) 
+		------
+		DECLARE @Restore_Data_Path nvarchar(4000)
+		DECLARE @Restore_Log_Path nvarchar(4000)
+		-------
+		DECLARE @DBLogicalName nvarchar(500)
+		DECLARE @LogLogicalName nvarchar(500)
+		DECLARE @rc INT
+		DECLARE @dir nvarchar(500)
+		DECLARE @DebugMode tinyint
+		-- 2 - Initialize variables 
+		SET @dbName = 'HPS_EDW_Temp'
+		SET @BackupName = 'PROD_STAGE_New_server_INCR.bak'
+		SET @FullbackupPath = '\\tpa-islstr-01\SQLBackupsFinance\DATALINK\PROD\TPAPWSQLDL001\' 
+		SET @DebugMode = 0
+		SET @Restore_Data_path = 'M:\EDW'
+		SET @Restore_Log_Path = 'L:\LOGS'
+
+		DECLARE @BackupHeaderTable table
+		(
+			BackupName          nvarchar(128),
+			BackupDescription         nvarchar(255),
+			[BackupType]               smallint,
+			ExpirationDate        datetime,
+			Compressed                 bit,
+			Position              smallint,
+			DeviceType	tinyint,
+			Username	nvarchar(128),
+			Servername	nvarchar(128),
+			Databasename	nvarchar(128),
+			DatabaseVersion	int,
+			DatabaseCreationDate datetime,
+			BackupSize numeric(20,0),
+			FirstLsn numeric(25,0),
+			LastLSN numeric(25,0),
+			CheckpointLSN numeric(25,0),
+			DatabaseBackupLSN	numeric(25,0),
+			BackupStartDate	datetime,
+			BackupFinishDate	datetime,
+			SortOrder	smallint,
+			CodePage	smallint,
+			UnicodeLocaleID	int,
+			UnicodeComparisonStyle int,
+			CompatabilityLevel	tinyint,
+			SoftwareVendorID	int,
+			SoftwareVersionMajor	int,
+			SoftwareVersionMinor	int,
+			SoftawreVersionBuild	int,
+			MachineName	nvarchar(128),
+			Flags	int,
+			BindingID	uniqueidentifier,
+			RecoveryForkID	uniqueidentifier,
+			Collation	nvarchar(128),
+			FamilyGUID	uniqueidentifier,
+			HasBulkLoggedData	bit,
+			IsSnapshot	bit,
+			IsReadOnly	bit,
+			IsSinglUser	bit,
+			HasBackupChecksums	bit,
+			IsDamaged	bit,
+			BeginsLogChain	bit,
+			HasIncompleteMetaData	bit,
+			IsForceOffline	bit,
+			IsCopyOnly	bit,
+			FirstRecoveryForkId	uniqueidentifier,
+			ForkPointLSN	numeric(25,0),
+			RecoveryModel	nvarchar(60),
+			DifferentialBaseLSN	numeric(25,0),
+			DifferntialBaseGUID	uniqueidentifier,
+			BackupTypeDescription	nvarchar(60),
+			BackupSetGUID	uniqueidentifier,
+			CompressedBackupSize	bigint,
+			containment	tinyint,
+			KeyAlgorithm	nvarchar(32),
+			EncryptorThumprint	varbinary(20),
+			EncryptorType	nvarchar(32),
+			LastValidRestoreTime datetime,
+			TimeZone nvarchar(20),
+			CompressionAlgorithm nvarchar(20)
+
+		)
+
+		DECLARE @fileListTable table
+		(
+			LogicalName          nvarchar(128),
+			PhysicalName         nvarchar(260),
+			[Type]               char(1),
+			FileGroupName        nvarchar(128),
+			Size                 numeric(20,0),
+			MaxSize              numeric(20,0),
+			FileID               bigint,
+			CreateLSN            numeric(25,0),
+			DropLSN              numeric(25,0),
+			UniqueID             uniqueidentifier,
+			ReadOnlyLSN          numeric(25,0),
+			ReadWriteLSN         numeric(25,0),
+			BackupSizeInBytes    bigint,
+			SourceBlockSize      int,
+			FileGroupID          int,
+			LogGroupGUID         uniqueidentifier,
+			DifferentialBaseLSN  numeric(25,0),
+			DifferentialBaseGUID uniqueidentifier,
+			IsReadOnl            bit,
+			IsPresent            bit,
+			TDEThumbprint        varbinary(32),
+			SnapshotUrl        nvarchar(32) 
+			
+		)
+
+
+		-- 3 - get list of files 
+		SET @cmd = 'DIR /b "' + @FullbackupPath + '"'
+
+		INSERT INTO @fileList(backupFile) 
+		EXEC master.sys.xp_cmdshell @cmd 
+
+		SELECT * FROM @fileList
+
+		-- 4 - Find latest full backup 
+		SELECT @lastFullBackup = MAX(backupFile)  
+		FROM @fileList  
+		WHERE backupFile  LIKE @BackupName 
+
+		IF @LastFullBackup IS NOT NULL
+		BEGIN
+
+	
+
+		-------
+		INSERT INTO @BackupHeaderTable exec('RESTORE HEADERONLY FROM DISK = ''' + @fullbackupPath + @lastfullbackup + '''')
+
+		DECLARE @DBBackupFinishDate datetime
+		SET @DBBackupFinishDate = (SELECT BackupFinishDate FROM @BackupHeaderTable WHERE BackupType=1)
+
+		IF DATEDIFF(day, @DBBackupFinishDate,GETDATE()) < 2
+			BEGIN
+		
+				------- 
+				INSERT INTO @fileListTable exec('RESTORE FILELISTONLY FROM DISK = ''' + @fullbackupPath + @lastfullbackup + '''')
+				SELECT * FROM @fileListTable
+
+				SET @DBLogicalName = CONVERT(varchar(255),(SELECT LogicalName FROM @fileListTable WHERE Type = 'D'))
+				PRINT 'DBLogicalName ' + @DBLogicalName
+
+				SET @LogLogicalName = CONVERT(varchar(255),(SELECT LogicalName FROM @fileListTable WHERE Type = 'L'))
+				PRINT 'LogLogicalName ' + @LogLogicalName
+
+				DECLARE @SEQUENCE varchar(10)
+				SET @SEQUENCE = CONVERT(varchar(2),DATEPART(DD,GETDATE())) + CONVERT(varchar(2),DATEPART(hh,GETDATE())) + CONVERT(varchar(2),DATEPART(mi,GETDATE()))
+
+				SET @cmd = 'RESTORE DATABASE [' + @dbName + '] FROM DISK = '''  
+				   --    + @fullbackupPath + @lastFullBackup + ''' WITH STATS=10, NORECOVERY, REPLACE, MOVE ''' + @DBLogicalName + ''' TO ''' + @RESTORE_Data_Path + 
+				   + @fullbackupPath + @lastFullBackup + ''' WITH STATS=10, NOUNLOAD, REPLACE, 
+				   MOVE ''' + @DBLogicalName + ''' TO ''' + @RESTORE_Data_Path + '\' + @dbName + @sequence + '.MDF'' , 
+				   MOVE ''' + @LogLogicalName + ''' TO ''' + @RESTORE_Log_Path + '\' + @dbName + @sequence + '.ldf'''
+				IF @DebugMode = 1
+					PRINT @cmd 
+				ELSE
+					EXEC (@cmd)
+			END
+
+			ELSE
+				BEGIN 
+					PRINT ' No Backup from Today Exists - No Restore Attempted '
+				END
+			END
+
+
+
+---- Rename the Backup Used.  Maybe put restored in front of the file name.
+
+
+
