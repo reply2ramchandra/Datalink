@@ -1,0 +1,200 @@
+USE [HPS_Config]
+GO
+
+/****** Object:  StoredProcedure [dbo].[LONG_RUNNING_JOBS_ALERT_SP]    Script Date: 11/19/2025 4:52:34 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+CREATE PROCEDURE [dbo].[LONG_RUNNING_JOBS_ALERT_SP]
+as 
+
+BEGIN
+ -- CREATED JEEVAN 2024-11-08 TO LONG RUNNING JOBS ALERT
+
+
+
+ 
+DECLARE @Style NVARCHAR(MAX)= '';
+DECLARE @tableHTML NVARCHAR(MAX)= '';
+
+
+SELECT SJ.JOB_ID, SJ.NAME AS JOB_NAME,
+    SH.STEP_NAME AS STEP_NAME,
+	SH.STEP_ID,
+    SHP.LASTRUNSTARTDATETIME,
+    DATEADD(SECOND, SHP.LASTRUNDURATIONSECONDS, SHP.LASTRUNSTARTDATETIME) AS LASTRUNFINISHDATETIME,
+    SHP.LASTRUNDURATIONSECONDS,
+	 SH.RUN_DATE, SH.RUN_TIME, SH.RUN_DURATION 
+	,CASE 
+WHEN RUN_STATUS = 0 THEN 'FAILED'
+WHEN RUN_STATUS = 1 THEN 'SUCCEEDED'
+WHEN RUN_STATUS = 2 THEN 'RETRY'
+WHEN RUN_STATUS = 3 THEN 'CANCELED'
+WHEN RUN_STATUS = 4 THEN 'IN PROGRESS'
+END AS RUN_STATUS,
+    CASE
+        WHEN SH.RUN_DURATION > 235959
+            THEN CAST((CAST(LEFT(CAST(SH.RUN_DURATION AS VARCHAR),
+                LEN(CAST(SH.RUN_DURATION AS VARCHAR)) - 4) AS INT) / 24) AS VARCHAR)
+                    + '.' + RIGHT('00' + CAST(CAST(LEFT(CAST(SH.RUN_DURATION AS VARCHAR),
+                LEN(CAST(SH.RUN_DURATION AS VARCHAR)) - 4) AS INT) % 24 AS VARCHAR), 2)
+                    + ':' + STUFF(CAST(RIGHT(CAST(SH.RUN_DURATION AS VARCHAR), 4) AS VARCHAR(6)), 3, 0, ':')
+        ELSE STUFF(STUFF(RIGHT(REPLICATE('0', 6) + CAST(SH.RUN_DURATION AS VARCHAR(6)), 6), 3, 0, ':'), 6, 0, ':')
+        END AS LASTRUNDURATION,
+  ROW_NUMBER() OVER (PARTITION BY SJ.NAME, SH.STEP_ID ORDER BY SH.RUN_DATE DESC, SH.RUN_TIME DESC) AS ROW_NUM
+  INTO #TEMP
+
+  --SELECT SH.* 
+FROM MSDB.DBO.SYSJOBS SJ
+INNER JOIN MSDB.DBO.SYSJOBHISTORY SH ON SJ.JOB_ID = SH.JOB_ID
+CROSS APPLY (SELECT DATETIMEFROMPARTS(SH.RUN_DATE / 10000, -- YEARS
+        SH.RUN_DATE % 10000 / 100, -- MONTHS
+        SH.RUN_DATE % 100, -- DAYS
+        SH.RUN_TIME / 10000, -- HOURS
+        SH.RUN_TIME % 10000 / 100, -- MINUTES
+        SH.RUN_TIME % 100, -- SECONDS
+        0 -- MILLISECONDS
+    ) AS LASTRUNSTARTDATETIME,
+    (SH.RUN_DURATION / 10000) * 3600 -- CONVERT HOURS TO SECONDS, CAN BE GREATER THAN 24
+    + ((SH.RUN_DURATION % 10000) / 100) * 60 -- CONVERT MINUTES TO SECONDS
+    + (SH.RUN_DURATION % 100) AS LASTRUNDURATIONSECONDS
+) AS SHP
+ORDER BY RUN_DATE DESC , RUN_TIME DESC
+
+
+
+
+
+SELECT
+J.NAME AS JOB_NAME
+,JS.STEP_ID
+,JS.STEP_NAME
+,JA.START_EXECUTION_DATE AS JOB_START_DATE
+,ISNULL(T.LASTRUNFINISHDATETIME, GETDATE()) AS CURRENT_STEP_START_DATE
+	
+,DATEDIFF(SECOND, ISNULL(T.LASTRUNFINISHDATETIME,JA.START_EXECUTION_DATE), GETDATE()) AS CURRENT_STEP_EXECUTION_SECONDS
+,CONVERT(VARCHAR, DATEDIFF(SECOND, ISNULL(T.LASTRUNFINISHDATETIME,JA.START_EXECUTION_DATE), GETDATE()) / 86400 ) + '.' + -- DAYS
+CONVERT(VARCHAR, DATEADD(MS, ( DATEDIFF(SECOND, ISNULL(T.LASTRUNFINISHDATETIME,JA.START_EXECUTION_DATE), GETDATE()) % 86400 ) * 1000, 0), 114)
+AS CURRENT_STEP_EXECUTION_DURATION
+
+,H.AVG_LASTRUNDURATIONSECONDS as AVG_LAST_RUN_SECONDS
+
+,CONVERT(VARCHAR, AVG_LASTRUNDURATIONSECONDS / 86400 ) + '.' + -- DAYS
+CONVERT(VARCHAR, DATEADD(MS, ( AVG_LASTRUNDURATIONSECONDS % 86400 ) * 1000, 0), 114)
+AS AVG_LAST_RUN_DURATION
+
+into #alert
+
+FROM MSDB.DBO.SYSJOBACTIVITY JA 
+LEFT JOIN MSDB.DBO.SYSJOBHISTORY JH ON JA.JOB_HISTORY_ID = JH.INSTANCE_ID
+JOIN MSDB.DBO.SYSJOBS J ON JA.JOB_ID = J.JOB_ID
+JOIN MSDB.DBO.SYSJOBSTEPS JS
+    ON JA.JOB_ID = JS.JOB_ID
+    AND ISNULL(JA.LAST_EXECUTED_STEP_ID,0)+1 = JS.STEP_ID
+LEFT JOIN #TEMP T ON JA.JOB_ID = T.JOB_ID AND T.ROW_NUM  = 1 AND JA.LAST_EXECUTED_STEP_ID = T.STEP_ID
+
+LEFT JOIN (
+SELECT JOB_NAME,STEP_NAME,STEP_ID ,AVG(LASTRUNDURATIONSECONDS) AVG_LASTRUNDURATIONSECONDS
+ FROM #TEMP WHERE ROW_NUM <= 10 AND RUN_STATUS = 'SUCCEEDED'
+ GROUP BY JOB_NAME,STEP_NAME,STEP_ID
+ ) H ON J.NAME = H.JOB_NAME AND JS.STEP_ID = H.STEP_ID
+
+WHERE
+  JA.SESSION_ID = (
+    SELECT TOP 1 SESSION_ID FROM MSDB.DBO.SYSSESSIONS ORDER BY AGENT_START_DATE DESC
+  )
+AND START_EXECUTION_DATE IS NOT NULL
+AND STOP_EXECUTION_DATE IS NULL
+AND J.NAME NOT LIKE '%000%'
+AND J.name NOT IN('EMAIL_ALERT_FOR_LONG_RUNNING_JOBS','001_ETL - LOAD - HPDQ_REFRESH')
+ AND DATEDIFF(SECOND, ISNULL(T.LASTRUNFINISHDATETIME,JA.START_EXECUTION_DATE), GETDATE()) > AVG_LASTRUNDURATIONSECONDS + ((AVG_LASTRUNDURATIONSECONDS * 30)/100)
+
+
+
+
+
+If (Select count(0) cnt from #alert) > 0
+Begin
+
+
+SET @Style += +N'<style type="text/css">' + N'.tg  {border-collapse:collapse;border-spacing:0;border-color:#bbb;}'
+    + N'.tg td{font-family:Arial, sans-serif;font-size:14px;padding:10px 5px;border-style:solid;border-width:1px;overflow:hidden;word-break:normal;border-color:#aaa;color:#000;background-color:#fff;}'
+    + N'.tg th{font-family:Arial, sans-serif;font-size:14px;font-weight:normal;padding:10px 5px;border-style:solid;border-width:1px;overflow:hidden;word-break:normal;border-color:#aaa;color:#fff;background-color:#6e72ff;}'
+    + N'.tg .tg-9ajh{font-weight:bold;background-color:black}' + N'.tg .tg-hgcj{font-weight:bold;text-align:center}'
+    + N'</style>';
+
+SET @tableHTML = 
+N'<font color="Blue"> Hi MSSQL and Datalink Teams , </font color>  
+' + '</H3>'+
+ 
+N'<font color="Blue"> This is an auto generated email to inform you that below Datalink Jobs are executing longer than normal duration in '+ @@servername +' Server.''</H3>' + '</font color>' +
+ 
+N'<H3><font color="Blue"> Please take the necessary action. </font color>  
+' + '</H3>'
+
+
+
+
+	+ N'<table class="tg">'
+	+ N'<tr>' 
+    + N'<th class="tg-hgcj">JOB_NAME</th>' 
+	+ N'<th class="tg-hgcj">STEP_ID</th>'
+	+ N'<th class="tg-hgcj">STEP_NAME</th>'
+	+ N'<th class="tg-hgcj">JOB_START_DATETIME</th>'
+	+ N'<th class="tg-hgcj">CURRENT_STEP_START_DATE</th>'
+	+ N'<th class="tg-hgcj">CURRENT_STEP_EXECUTION_DURATION</th>'
+	+ N'<th class="tg-hgcj">AVG_LAST_RUN_DURATION</th>'
+	+ N'</tr>' 
+    + CAST(( 
+  SELECT 
+					td = JOB_NAME,  '',
+					td = STEP_ID,  '',
+					td = STEP_NAME,  '',
+					td = convert( varchar(19), JOB_START_DATE, 121 ),  '',
+					td = convert( varchar(19), CURRENT_STEP_START_DATE, 121 ),  '',
+					td = CURRENT_STEP_EXECUTION_DURATION,  '',
+					td = AVG_LAST_RUN_DURATION,  ''
+  from #alert
+           FOR
+             XML PATH('tr') ,
+                 TYPE
+           ) AS NVARCHAR(MAX)) + N'</table>';     
+END
+
+
+
+
+ set @tableHTML = @Style + @tableHTML;
+declare @subject1 varchar(1000) = concat('LONG RUNNING JOBS IN ', @@servername)
+
+if @tableHTML != ''
+BEGIN
+
+    EXEC msdb.dbo.sp_send_dbmail
+      @profile_name = 'DataLink Notify',
+      @recipients = 'WHPS-MSSQL-Admins@wipro.com;WHPS-Datalink-Internal@wipro.com',
+      @subject = @subject1,
+      @body = @tableHTML,
+	  @body_format = 'HTML'
+	  ;
+END
+
+END
+
+
+
+
+
+
+
+GO
+
+

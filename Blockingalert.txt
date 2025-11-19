@@ -1,0 +1,105 @@
+USE [HPS_ODS]
+GO
+
+/****** Object:  StoredProcedure [dbo].[BLOCKING_ALERT_SP]    Script Date: 11/19/2025 4:50:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+CREATE PROCEDURE [dbo].[BLOCKING_ALERT_SP]
+as 
+BEGIN
+-- Created Swapna 2023-12-15 to Generate No Data Alerts
+
+
+
+ 
+DECLARE @Style NVARCHAR(MAX)= '';
+DECLARE @tableHTML NVARCHAR(MAX)= '';
+DECLARE @tableHTML1 NVARCHAR(MAX)= '';
+DECLARE @tableHTML2 NVARCHAR(MAX)= '';
+
+SET @Style += +N'<style type="text/css">' + N'.tg  {border-collapse:collapse;border-spacing:0;border-color:#aaa;}'
+    + N'.tg td{font-family:Arial, sans-serif;font-size:14px;padding:10px 5px;border-style:solid;border-width:1px;overflow:hidden;word-break:normal;border-color:#aaa;color:#aaa;background-color:#fff;}'
+    + N'.tg th{font-family:Arial, sans-serif;font-size:14px;font-weight:normal;padding:10px 5px;border-style:solid;border-width:1px;overflow:hidden;word-break:normal;border-color:#aaa;color:#fff;background-color:#f38630;}'
+    + N'.tg .tg-9ajh{font-weight:bold;background-color:#68cbd0}' + N'.tg .tg-hgcj{font-weight:bold;text-align:center}'
+    + N'</style>';
+ 
+
+
+--drop table #temp
+;WITH BLOCKING_CTE (session_id,wait_duration_ms, wait_type, blocking_session_id,BLOCKING_CNT)
+AS
+(
+SELECT distinct session_id, wait_duration_ms, wait_type, blocking_session_id,COUNT(*) BLOCKING_CNT
+FROM sys.dm_os_waiting_tasks 
+WHERE blocking_session_id <> 0 and wait_duration_ms>600000
+GROUP BY session_id, wait_duration_ms, wait_type, blocking_session_id
+)
+
+SELECT BLOCKING_CNT  into #temp
+FROM BLOCKING_CTE;
+
+
+--Drop table #BLOCKING_ALERTS
+select * into #BLOCKING_ALERTS from #temp 
+
+--select * from #BLOCKING_ALERTS
+
+
+-- BLOCKING_ALERTS
+If (Select count(0) from #BLOCKING_ALERTS where  BLOCKING_CNT IS NOT NULL OR BLOCKING_CNT <> 0)> 0
+Begin
+
+SET @tableHTML2 = @Style + N'<H2> There is a Blocker </H2>' 
+
+
+	+ N'<table class="tg">'
+	+ N'<tr>' 
+    + N'<th class="tg-hgcj">DATE</th>' 
+	+ N'<th class="tg-hgcj">ENDPOINT_Total_cnt</th>'
+	+ N'</tr>' 
+    + CAST(( 
+  SELECT 
+					td = getdate(),  '',
+                    td = isnull(BLOCKING_CNT,0),  ''
+  from #BLOCKING_ALERTS where BLOCKING_CNT is null or BLOCKING_CNT = 0
+           FOR
+             XML PATH('tr') ,
+                 TYPE
+           ) AS NVARCHAR(MAX)) + N'</table>';     
+END
+
+set @tableHTML = @tableHTML1 + @tableHTML2;
+
+
+if @tableHTML != ''
+BEGIN
+
+    EXEC msdb.dbo.sp_send_dbmail
+      @profile_name = 'DataLink Notify',
+      @recipients = 'WHPS-Datalink-Internal@wipro.com'
+      ,@subject = 'NO OF BLOCKINGS',
+      @body = @tableHTML,
+	  @body_format = 'HTML'
+	  ;
+END
+
+END
+
+
+
+
+
+
+
+
+GO
+
+

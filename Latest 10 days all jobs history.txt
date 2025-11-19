@@ -1,0 +1,24 @@
+USE msdb;
+GO
+ 
+SELECT 
+    j.name AS JobName,
+    h.run_date,
+    h.run_time,
+    msdb.dbo.agent_datetime(h.run_date, h.run_time) AS RunDateTime,
+    h.run_status,
+    CASE h.run_status
+        WHEN 0 THEN 'Failed'
+        WHEN 1 THEN 'Succeeded'
+        WHEN 2 THEN 'Retry'
+        WHEN 3 THEN 'Canceled'
+        WHEN 4 THEN 'In Progress'
+    END AS RunStatus
+FROM 
+    msdb.dbo.sysjobhistory h
+INNER JOIN 
+    msdb.dbo.sysjobs j ON h.job_id = j.job_id
+WHERE 
+    msdb.dbo.agent_datetime(h.run_date, h.run_time) >= DATEADD(DAY, -10, GETDATE())
+ORDER BY 
+    RunDateTime DESC;
